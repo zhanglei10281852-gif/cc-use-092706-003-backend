@@ -42,8 +42,14 @@ class ComputeRepository:
         rows = self.connection.execute("SELECT status,COUNT(*) AS amount FROM compute_tasks WHERE requested_by=? GROUP BY status", (requested_by,)).fetchall()
         return {str(row["status"]): int(row["amount"]) for row in rows}
 
-    def count_user_submissions_since(self, requested_by: str, since: str) -> int:
-        return int(self.connection.execute("SELECT COUNT(*) FROM compute_tasks WHERE requested_by=? AND created_at>=?", (requested_by, since)).fetchone()[0])
+    def count_user_submissions_between(self, requested_by: str, day_start: str, next_day_start: str) -> int:
+        """统计业务自然日 [day_start, next_day_start) 内的提交数，边界均为 UTC 存储格式。"""
+        return int(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM compute_tasks WHERE requested_by=? AND created_at>=? AND created_at<?",
+                (requested_by, day_start, next_day_start),
+            ).fetchone()[0]
+        )
 
     def task_by_id(self, task_id: int) -> sqlite3.Row | None:
         return self.connection.execute("SELECT t.*,tpl.code AS template_code,tpl.algorithm AS template_algorithm FROM compute_tasks t JOIN compute_templates tpl ON tpl.id=t.template_id WHERE t.id=?", (task_id,)).fetchone()
