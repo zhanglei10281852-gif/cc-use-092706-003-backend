@@ -3,11 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from app.compute.repository import ComputeRepository
-from app.core.clock import Clock, SystemClock, to_storage
+from app.core.clock import Clock, SystemClock, as_timezone, business_day_window, to_storage
+from app.core.config import Settings
 from app.core.errors import ConflictError, NotFoundError, ValidationError
 from app.database import get_connection, transaction
 
@@ -20,9 +22,12 @@ def digest(value: Any) -> str:
 class ComputeOperationsService:
     """管理计算模板、配额、任务租约、结果版本和人工干预。"""
 
-    def __init__(self, connection: sqlite3.Connection | None = None, clock: Clock | None = None) -> None:
+    def __init__(self, connection: sqlite3.Connection | None = None, clock: Clock | None = None, timezone: ZoneInfo | str | None = None) -> None:
         self.connection = connection or get_connection()
         self.clock = clock or SystemClock()
+        if timezone is None:
+            timezone = Settings.load().business_timezone
+        self.timezone = as_timezone(timezone)
         self.repository = ComputeRepository(self.connection)
 
     def list_templates(self) -> list[dict[str, Any]]:
@@ -244,8 +249,13 @@ class ComputeOperationsService:
             raise ConflictError("用户排队任务配额已用尽")
         if states.get("running", 0) >= int(quota["max_running"]):
             raise ConflictError("用户运行任务配额已用尽")
-        day_start = to_storage(now.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0))
-        if repository.count_user_submissions_since(requested_by, day_start) >= int(quota["daily_submissions"]):
+        # 按保护区所在地（业务时区）的自然日统计：把本地零点换算成 UTC 瞬时，
+        # 与存储中的 UTC 时间戳做半开区间比较，跨日不会重复计数或漏计。
+        day_start, day_end = business_day_window(now, self.timezone)
+        used = repository.count_user_submissions_between(
+            requested_by, to_storage(day_start), to_storage(day_end)
+        )
+        if used >= int(quota["daily_submissions"]):
             raise ConflictError("用户当日提交配额已用尽")
 
     @staticmethod
